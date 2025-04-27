@@ -142,3 +142,141 @@ st.markdown(
     f"- Modified Duration: **{selected_bank_df['Modified Duration']:.3f} yr**  \n"
     f"- Capital Adequacy Ratio: **{selected_bank_df.get('capital adequacy ratio', np.nan):.2%}**"
 )
+
+# bank_stacx_app.py  ── v2
+"""
+Bank Stacx 2.0 – Streamlit dashboard for peer‑to‑peer bank analytics
+-------------------------------------------------------------------
+This rev adds **robust file‑handling** so you don’t see the
+`FileNotFoundError` again:
+* If `Line items (1).xlsx` is present in the app folder, we load it.
+* Otherwise we show a **file‑uploader** widget so you can drag‑and‑drop
+  the file at run‑time.
+* After upload, the file is cached in `st.session_state` so the page
+  reloads never re‑ask for it.
+
+To run locally:
+```bash
+pip install streamlit pandas numpy plotly openpyxl
+streamlit run bank_stacx_app.py
+```
+
+```python
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from pathlib import Path
+
+st.set_page_config(page_title="Bank Stacx 2.0", layout="wide")
+
+DATA_FILE = Path("Line items (1).xlsx")
+
+# ---------------------------
+# Data loader with fallback
+# ---------------------------
+@st.cache_data(show_spinner=False)
+def load_data(path: Path) -> pd.DataFrame:
+    return pd.read_excel(path, sheet_name=0)
+
+if "df_raw" not in st.session_state:
+    if DATA_FILE.exists():
+        st.session_state.df_raw = load_data(DATA_FILE)
+    else:
+        st.info("📄 Upload your **Line items (1).xlsx)** file to begin.")
+        upload = st.file_uploader("Upload Excel", type=["xlsx", "xls"], key="u1")
+        if upload:
+            DATA_FILE.write_bytes(upload.getbuffer())  # persist to disk
+            st.session_state.df_raw = load_data(DATA_FILE)
+            st.success("File loaded – reload page if anything looks odd.")
+            st.experimental_rerun()
+
+# If still no data, stop here
+if "df_raw" not in st.session_state:
+    st.stop()
+
+df_raw = st.session_state.df_raw
+
+# ---------------------------
+# Helpers
+# ---------------------------
+BANK_COL = "Bank"  # adjust if your column header differs
+
+@st.cache_data(show_spinner=False)
+def list_banks(df: pd.DataFrame):
+    return sorted(df[BANK_COL].dropna().unique())
+
+banks = list_banks(df_raw)
+selected_bank = st.sidebar.selectbox("Select Bank", banks)
+peer_count = st.sidebar.number_input("Peers (top N by assets)", 1, len(banks)-1, 3)
+
+# Build peer set – simplistic: pick next N banks in list
+sel_idx = banks.index(selected_bank)
+peer_banks = banks[max(0, sel_idx - peer_count): sel_idx] + \
+             banks[sel_idx + 1: sel_idx + 1 + peer_count]
+
+peer_df = df_raw[df_raw[BANK_COL].isin([selected_bank] + peer_banks)].copy()
+
+st.title("🏦 Bank Stacx 2.0 – Peer Comparison Dashboard")
+
+# ---------------------------
+# Key Financials Tab
+# ---------------------------
+fin_cols = [
+    "PAT", "Depreciation", "Total Liabilities (excluding equity)",
+    "Cash & cash equivalents", "Total Assets", "Current Assets",
+    "Current Liabilities", "Accounts Receivables", "Marketable Securities",
+    "Core Deposits", "Total Deposits", "Loans", "Non performing assets",
+    "Tier-1 Capital", "Tier-2 capital", "Risk weighted assets",
+]
+
+with st.expander("📊 Key Financials (peer table)"):
+    st.dataframe(peer_df[[BANK_COL] + fin_cols].set_index(BANK_COL))
+
+# ---------------------------
+# Key Metrics Tab
+# ---------------------------
+metric_defs = {
+    "Core deposits / total deposits": lambda d: d["Core Deposits"] / d["Total Deposits"],
+    "NPAs / total loans": lambda d: d["Non performing assets"] / d["Loans"],
+    "Liquidity ratio": lambda d: d["Cash & cash equivalents"] / d["Current Liabilities"],
+    "Capital adequacy ratio": lambda d: (d["Tier-1 Capital"] + d["Tier-2 capital"]) / d["Risk weighted assets"],
+    "Solvency ratio": lambda d: d["Tier-1 Capital"] / d["Total Liabilities (excluding equity)"],
+    "Loans / deposits": lambda d: d["Loans"] / d["Total Deposits"],
+}
+
+metric = st.selectbox("Choose metric", list(metric_defs.keys()))
+
+peer_df[metric] = metric_defs[metric](peer_df)
+sector_avg = peer_df[metric].mean()
+
+fig = px.bar(peer_df, x=BANK_COL, y=metric, color=BANK_COL,
+             title=f"{metric} vs Sector Avg ({sector_avg:.2%})",
+             text=peer_df[metric].apply(lambda x: f"{x:.2%}"))
+fig.add_hline(y=sector_avg, line_dash="dot", annotation_text="Sector Avg",
+              annotation_position="top left")
+st.plotly_chart(fig, use_container_width=True)
+
+# ---------------------------
+# CCAR Stress‑Test Section
+# ---------------------------
+ccar_cols = [
+    "Common Equity Tier 1 Capital", "Tier 1 Capital Ratio", "Total Capital",
+    "Leverage Ratio", "Supplementary Tier 1",
+]
+
+with st.expander("🛡️ CCAR Stress‑Test Metrics"):
+    st.dataframe(peer_df[[BANK_COL] + ccar_cols].set_index(BANK_COL))
+
+# ---------------------------
+# Narrative Summary
+# ---------------------------
+selected_metric_val = peer_df.loc[peer_df[BANK_COL]==selected_bank, metric].iloc[0]
+of_sector = "above" if selected_metric_val > sector_avg else "below"
+
+st.markdown(
+    f"**Summary:** **{selected_bank}**’s **{metric}** is **{selected_metric_val:.2%}**, "
+    f"which is **{of_sector}** the peer‑set average of **{sector_avg:.2%}**."
+)
+```
+
